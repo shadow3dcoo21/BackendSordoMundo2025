@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');  // Mejor usar jsonwebtoken para verificar la firma
-const User = require('../models/User');  // Si necesitas acceder al usuario en la base de datos
+const User = require('../models/Users/User');  // Si necesitas acceder al usuario en la base de datos
 
 const authMiddleware = (req, res, next) => {
   // Obtener el token del encabezado 'Authorization' (formato 'Bearer <token>')
