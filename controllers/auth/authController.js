@@ -158,23 +158,26 @@ const loginUser = async (req, res) => {
   try {
     // Extraer el rol desde la URL
     const roleFromUrl = req.originalUrl.split('/').pop();
+    console.log('aqui entra normal : ',roleFromUrl);
 
     // Verificar si el usuario existe y está activo
     const user = await User.findOne({ username, status: 'active' }).populate('profileRef');
     if (!user) {
-      return res.status(404).json({ 
+      return res.status(404).json(console.log('problemas '),{ 
         message: 'Usuario no encontrado o cuenta inactiva' 
+        
       });
     }
 
     // Validaciones específicas por rol
     switch(user.role) {
-      case 'alumno':
+      case 'estudiante':
+        console.log('rol alumno entro normal');
         // Solo requiere username
         if (!username) {
           return res.status(400).json({ message: 'El nombre de usuario es obligatorio' });
         }
-        if (roleFromUrl !== 'alumno') {
+        if (roleFromUrl !== 'estudiante') {
           return res.status(400).json({ message: 'Ruta de login incorrecta para este rol' });
         }
         break;
@@ -268,9 +271,12 @@ const loginUser = async (req, res) => {
   }
 };
 
+
 // Función para registrar un nuevo usuario
 const registerUser = async (req, res) => {
   const { username, password, firstName, lastName, sex, email, dni, age, phone, grade, specialty, institution } = req.body;
+  let newUser;
+  let newPerson;
 
   try {
     // 1. Validar campos obligatorios
@@ -418,7 +424,329 @@ const changeStatus = async (req, res) => {
   }
 };
 
+// Función para listar usuarios con sus perfiles
+const getUsers = async (req, res) => {
+  try {
+    // 1. Verificar si el usuario tiene permisos (opcional, dependiendo de tus requerimientos)
+    // if (req.user.role !== 'admin') {
+    //   return res.status(403).json({ message: "No autorizado" });
+    // }
+
+    // 2. Obtener todos los usuarios con sus perfiles asociados usando populate
+    const users = await User.find({})
+      .select('-password') // Excluir la contraseña
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v' // Excluir campos innecesarios
+      })
+      .lean(); // Convertir a objeto JavaScript simple
+
+    // 3. Formatear la respuesta combinando datos de User y Person
+    const formattedUsers = users.map(user => {
+      const { profileRef, ...userData } = user;
+      return {
+        ...userData,
+        ...profileRef
+      };
+    });
+
+    return res.status(200).json({
+      message: "Usuarios obtenidos exitosamente",
+      count: formattedUsers.length,
+      users: formattedUsers
+    });
+
+  } catch (error) {
+    console.error("Error al obtener usuarios:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+// Controlador para obtener un usuario por ID
+const getUserById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validar que el ID tenga un formato correcto
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "ID de usuario inválido" });
+    }
+
+    // Buscar usuario con populate
+    const user = await User.findById(id)
+      .select('-password')
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v'
+      })
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Combinar datos del usuario y su perfil
+    const formattedUser = {
+      ...user,
+      ...user.profileRef
+    };
+    delete formattedUser.profileRef;
+
+    return res.status(200).json({
+      message: "Usuario obtenido exitosamente",
+      user: formattedUser
+    });
+
+  } catch (error) {
+    console.error("Error al obtener usuario:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+const updateUser = async (req, res) => {
+  const { id } = req.params;
+  let userData = {};
+  let personData = {};
+
+  try {
+    // 1. Validar ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "ID inválido" });
+    }
+
+    // 2. Buscar usuario con su perfil
+    const existingUser = await User.findById(id)
+      .populate('profileRef')
+      .lean();
+      
+    if (!existingUser || !existingUser.profileRef) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // 3. Separar datos de User y Person
+    const { username, password, ...rest } = req.body;
+    
+    // Datos para User
+    if (username) userData.username = username;
+    if (password) {
+      userData.password = await bcrypt.hash(password, 10);
+    }
+
+    // Datos para Person
+    personData = rest;
+    const role = existingUser.role;
+
+    // 4. Validaciones de unicidad
+    if (username) {
+      const userExists = await User.findOne({ username, _id: { $ne: id } });
+      if (userExists) return res.status(400).json({ message: "Nombre de usuario en uso" });
+    }
+
+    if (personData.email) {
+      const emailExists = await Person.findOne({ 
+        email: personData.email, 
+        _id: { $ne: existingUser.profileRef._id } 
+      });
+      if (emailExists) return res.status(400).json({ message: "Email ya registrado" });
+    }
+
+    if (personData.dni) {
+      const dniExists = await Person.findOne({ 
+        dni: personData.dni, 
+        _id: { $ne: existingUser.profileRef._id } 
+      });
+      if (dniExists) return res.status(400).json({ message: "DNI ya registrado" });
+    }
+
+    // 5. Validaciones por rol
+    if (role === 'estudiante' && personData.grade !== undefined && !personData.grade) {
+      return res.status(400).json({ message: "Grado es requerido para estudiantes" });
+    }
+    
+    if (role === 'profesor' && personData.specialty !== undefined && !personData.specialty) {
+      return res.status(400).json({ message: "Especialidad es requerida para profesores" });
+    }
+    
+    if (role === 'externo' && personData.institution !== undefined && !personData.institution) {
+      return res.status(400).json({ message: "Institución es requerida para externos" });
+    }
+
+    // 6. Actualizar documentos
+    const updateOperations = [];
+    
+    if (Object.keys(userData).length > 0) {
+      updateOperations.push(
+        User.findByIdAndUpdate(id, { $set: userData }, { new: true })
+      );
+    }
+    
+    if (Object.keys(personData).length > 0) {
+      updateOperations.push(
+        Person.findByIdAndUpdate(
+          existingUser.profileRef._id,
+          { $set: personData },
+          { new: true }
+        )
+      );
+    }
+
+    const [updatedUser, updatedPerson] = await Promise.all(updateOperations);
+
+    // 7. Obtener y formatear respuesta
+    const finalUser = await User.findById(id)
+      .select('-password')
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v'
+      })
+      .lean();
+
+    const formattedUser = {
+      ...finalUser,
+      ...finalUser.profileRef
+    };
+    delete formattedUser.profileRef;
+
+    return res.status(200).json({
+      message: "Usuario actualizado exitosamente",
+      user: formattedUser
+    });
+
+  } catch (error) {
+    console.error("Error en actualización:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+const deleteUser = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // 1. Validar ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "ID de usuario inválido" });
+    }
+
+    // 2. Buscar usuario
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // 3. Eliminar perfil primero
+    const deletedPerson = await Person.findOneAndDelete({ userRef: id });
+    
+    // 4. Eliminar usuario
+    const deletedUser = await User.findByIdAndDelete(id);
+
+    // 5. Verificar eliminación completa
+    if (!deletedPerson || !deletedUser) {
+      // Rollback manual si falló alguna eliminación
+      if (deletedPerson && !deletedUser) {
+        await Person.create({ _id: deletedPerson._id, ...deletedPerson.toObject() });
+      }
+      return res.status(500).json({ message: "Error al eliminar los registros" });
+    }
+
+    return res.status(200).json({
+      message: "Usuario y perfil eliminados exitosamente",
+      deletedUserId: id
+    });
+
+  } catch (error) {
+    console.error("Error al eliminar usuario:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+//Reset password
+const changePassword = async (req, res) => {
+  const { id } = req.params;
+  const { oldPassword, newPassword, confirmNewPassword } = req.body;
+
+  try {
+    // 1. Validar ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "ID de usuario inválido" });
+    }
+
+    // 2. Buscar usuario
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // 3. Validar campos obligatorios
+    if (!oldPassword || !newPassword || !confirmNewPassword) {
+      return res.status(400).json({ message: "Todos los campos son requeridos" });
+    }
+
+    // 4. Validar coincidencia de nuevas contraseñas
+    if (newPassword !== confirmNewPassword) {
+      return res.status(400).json({ message: "Las nuevas contraseñas no coinciden" });
+    }
+
+    // 5. Validar contraseña anterior
+    const isMatch = await bcrypt.compare(oldPassword, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Contraseña actual incorrecta" });
+    }
+
+    // 6. Validar fortaleza de nueva contraseña
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    
+    if (!passwordRegex.test(newPassword)) {
+      return res.status(400).json({
+        message: "La nueva contraseña debe contener:",
+        requirements: {
+          minLength: 8,
+          uppercase: true,
+          lowercase: true,
+          number: true,
+          specialChar: true
+        }
+      });
+    }
+
+    // 7. Hashear y actualizar contraseña
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    await user.save();
+
+    // 8. Opcional: Invalidate tokens anteriores si usas JWT
+
+    return res.status(200).json({
+      message: "Contraseña actualizada exitosamente",
+      userId: user._id,
+      updatedAt: user.updatedAt
+    });
+
+  } catch (error) {
+    console.error("Error al cambiar contraseña:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
 module.exports = { 
+  changePassword ,
+  deleteUser,
+  updateUser,
+  getUserById,
+  getUsers,
   loginUser, 
   registerUser,
   changeStatus

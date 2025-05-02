@@ -8,6 +8,7 @@ const path = require('path');
 const multer = require('multer');
 const { deleteFile } = require('../../util/cloudflareDelete');
 const { uploadFile } = require('../../util/s3'); // Asegúrate de usar la ruta correcta para tu función uploadFile
+const mongoose = require('mongoose'); // <-- Importa Mongoose aquí
 // Asegura que la carpeta 'temp' exista
 const tempDir = path.join(__dirname, '../../temp');
 if (!fs.existsSync(tempDir)) {
@@ -98,6 +99,77 @@ router.post('/registrardatoscomletar',authMiddleware, async (req, res) => {
 });
 
 module.exports = router;
+ 
+
+router.get('/obtenerdatoscompletos', authMiddleware, async (req, res) => {
+  try {
+    const juegos = await Juego.find()
+      .populate({
+        path: 'alumno', // Pobla el User asociado al Juego
+        select: '-password', // Excluye la contraseña del User
+        populate: {
+          path: 'profileRef', // Pobla el Person asociado al User
+          model: 'Person' // Asegura que usa el modelo correcto
+        }
+      })
+      .exec();
+
+    res.status(200).json(juegos);
+  } catch (error) {
+    console.error('Error al obtener los juegos:', error);
+    res.status(500).send('Error al recuperar los datos');
+  }
+});
+
+router.get('/obtenerdatoscompletos/alumno/:alumnoId', authMiddleware, async (req, res) => {
+  try {
+    const { alumnoId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(alumnoId)) { // <-- Ahora funciona
+      return res.status(400).send("ID de alumno inválido");
+    }
+
+    const juegos = await Juego.find({ alumno: alumnoId })
+      .populate({
+        path: 'alumno',
+        select: '-password',
+        populate: { path: 'profileRef', model: 'Person' }
+      })
+      .exec();
+
+    if (juegos.length === 0) {
+      return res.status(404).send("No se encontraron juegos para este alumno");
+    }
+
+    res.status(200).json(juegos);
+  } catch (error) {
+    console.error('Error al obtener juegos por alumno:', error);
+    res.status(500).send("Error interno del servidor");
+  }
+});
+
+
+
+router.get('/obtenerdatoscompletos/juego/:juegoId', authMiddleware, async (req, res) => {
+  try {
+    const { juegoId } = req.params;
+    
+    const juego = await Juego.findById(juegoId)
+      .populate({
+        path: 'alumno',
+        select: '-password',
+        populate: { path: 'profileRef' }
+      });
+
+    if (!juego) return res.status(404).send("Juego no encontrado");
+    
+    res.status(200).json(juego);
+  } catch (error) {
+    console.error('Error al obtener juego por ID:', error);
+    res.status(500).send("Error interno del servidor");
+  }
+});
+
 
 
 // Función para remover la primera letra y reemplazarla por _
@@ -497,6 +569,118 @@ router.get('/games/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Error al obtener el juego',
+      detalle: error.message
+    });
+  }
+});
+
+
+
+router.delete('/games/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validar ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de juego inválido'
+      });
+    }
+
+    // Buscar y eliminar
+    const deletedGame = await GameModel.findByIdAndDelete(id);
+
+    if (!deletedGame) {
+      return res.status(404).json({
+        success: false,
+        error: 'Juego no encontrado'
+      });
+    }
+
+    // Opcional: Eliminar imagen de Cloudflare aquí si es necesario
+    // await deleteFileFromCloudflare(deletedGame.coverImage);
+
+    res.status(200).json({
+      success: true,
+      message: 'Juego eliminado exitosamente',
+      data: deletedGame
+    });
+
+  } catch (error) {
+    console.error('Error eliminando juego:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al eliminar el juego',
+      detalle: error.message
+    });
+  }
+});
+
+
+router.put('/games/:id', authMiddleware, upload.single('coverImage'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, iframe, difficulty, uploadedBy } = req.body;
+
+    // Validar ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de juego inválido'
+      });
+    }
+
+    // Buscar juego existente
+    const existingGame = await GameModel.findById(id);
+    if (!existingGame) {
+      return res.status(404).json({
+        success: false,
+        error: 'Juego no encontrado'
+      });
+    }
+
+    // Procesar nueva imagen si existe
+    let imageUrl = existingGame.coverImage;
+    if (req.file) {
+      const coverImageFile = req.file;
+      const imageExtension = path.extname(coverImageFile.originalname);
+      const imageName = `${name.replace(/\s+/g, '_')}_cover${imageExtension}`;
+      imageUrl = await uploadFile(
+        imageName,
+        coverImageFile.buffer,
+        `image/${imageExtension.substring(1)}`
+      );
+    }
+
+    // Crear objeto actualizado
+    const updateData = {
+      name: name || existingGame.name,
+      description: description || existingGame.description,
+      coverImage: imageUrl,
+      iframe: iframe || existingGame.iframe,
+      difficulty: difficulty || existingGame.difficulty,
+      uploadedBy: uploadedBy ? JSON.parse(uploadedBy) : existingGame.uploadedBy
+    };
+
+    // Actualizar y devolver nuevo documento
+    const updatedGame = await GameModel.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Juego actualizado exitosamente',
+      data: updatedGame
+    });
+
+  } catch (error) {
+    console.error('Error actualizando juego:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al actualizar el juego',
       detalle: error.message
     });
   }

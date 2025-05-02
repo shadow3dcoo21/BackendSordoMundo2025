@@ -29,7 +29,7 @@ const userSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    unique: true,  // El correo electrónico debe ser único si se proporciona
+      // El correo electrónico debe ser único si se proporciona
     match: [/\S+@\S+\.\S+/, 'Por favor ingrese un correo válido'],
   },
 });
