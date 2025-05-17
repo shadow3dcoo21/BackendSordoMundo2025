@@ -25,7 +25,7 @@ const uploadFile = async (fileName, fileBuffer, mimeType) => {
     console.log(`Archivo subido correctamente a ${data.Location}`);
     
     // Retorna la URL pública basada en el subdominio de R2
-    const publicUrl = `https://pub-2555519d15694f098bf1a74e67d4d0e1.r2.dev/sordomundomultimedia/${fileName}`;
+    const publicUrl = `https://s3.sordomundo.pro/sordomundomultimedia/${fileName}`;
     
     // Retorna la URL pública para almacenarla en la base de datos
     return publicUrl;
