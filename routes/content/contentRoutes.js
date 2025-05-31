@@ -7,36 +7,245 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const { deleteFile } = require('../../util/cloudflareDelete');
-const { uploadFile } = require('../../util/s3'); // Asegúrate de usar la ruta correcta para tu función uploadFile
-const mongoose = require('mongoose'); // <-- Importa Mongoose aquí
+const { uploadFile } = require('../../util/s3');
+const mongoose = require('mongoose');
+
+// ✅ Usar la instancia global en lugar de importar
+// const { io } = require('../../server'); ❌ Removido para evitar importación circular
+
 // Asegura que la carpeta 'temp' exista
 const tempDir = path.join(__dirname, '../../temp');
 if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir);
 }
 
-// Definimos el almacenamiento en memoria, para evitar guardar el archivo localmente
-const storage = multer.memoryStorage(); // Usamos 'memoryStorage' para almacenar los archivos en la memoria en lugar de en el disco
-
-const upload = multer({ storage: storage }); // Configuramos multer para usar la memoria
-console.log("hola",typeof authMiddleware);  // Debe imprimir 'function' si está importado correctamente
+// Definimos el almacenamiento en memoria
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+console.log("hola", typeof authMiddleware);
 
 const router = express.Router();
 
+// ✅ Función helper para obtener io
+const getIO = () => {
+  if (global.io) {
+    return global.io;
+  }
+  console.warn('⚠️ Socket.io no está disponible globalmente');
+  return null;
+};
 
-
-
-
-// Se debe marcar la función como 'async' para usar 'await'
+// Endpoint GET para obtener palabras
 router.get('/words', authMiddleware, async (req, res) => {
   try {
-      const presentaciones = await Presentar.find();  // Usar 'await' en la consulta
-      res.json(presentaciones);
+    const presentaciones = await Presentar.find();
+    res.json(presentaciones);
   } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Error al obtener los datos de presentación' });
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener los datos de presentación' });
   }
 });
+
+// Endpoint POST para crear nueva entrada
+router.post('/CreateWords', authMiddleware, upload.fields([
+  { name: 'imagen', maxCount: 1 },
+  { name: 'video0', maxCount: 1 },
+  { name: 'video1', maxCount: 1 },
+  { name: 'video2', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    
+    const titulos = [
+      { titulo: req.body['titulos[0].titulo'] },
+      { titulo: req.body['titulos[1].titulo'] },
+      { titulo: req.body['titulos[2].titulo'] }
+    ];
+    
+    const videoFiles = [
+      req.files['video0']?.[0],
+      req.files['video1']?.[0],
+      req.files['video2']?.[0]
+    ];
+
+    if (!req.files?.imagen) {
+      return res.status(400).json({ error: 'La imagen principal es requerida' });
+    }
+
+    // Subir imagen principal
+    const imagenFile = req.files.imagen[0];
+    const imagenExtension = path.extname(imagenFile.originalname);
+    const imagenNombre = `${nombre.replace(/\s+/g, '_')}_imagen${imagenExtension}`;
+    const imagenUrl = await uploadFile(
+      imagenNombre,
+      imagenFile.buffer,
+      `image/${imagenExtension.substring(1)}`
+    );
+
+    // Subir videos y construir titulos
+    const titulosConVideos = await Promise.all(
+      titulos.map(async (titulo, index) => {
+        const videoFile = videoFiles[index];
+        if (!videoFile) {
+          throw new Error(`Video ${index + 1} es requerido`);
+        }
+
+        const videoExtension = path.extname(videoFile.originalname);
+        const videoNombre = `${nombre.replace(/\s+/g, '_')}_video${index + 1}${videoExtension}`;
+        const videoUrl = await uploadFile(
+          videoNombre,
+          videoFile.buffer,
+          `video/${videoExtension.substring(1)}`
+        );
+
+        return {
+          titulo: titulo.titulo,
+          video: videoUrl
+        };
+      })
+    );
+
+    // Crear nuevo documento en MongoDB
+    const nuevaPresentacion = new Presentar({
+      imagen: imagenUrl,
+      nombre,
+      titulos: titulosConVideos
+    });
+
+    await nuevaPresentacion.save();
+
+    // ✅ MEJORADO: Emitir evento WebSocket con verificación
+    const io = getIO();
+    if (io) {
+      const socketData = {
+        action: 'create',
+        data: nuevaPresentacion.toObject(),
+        timestamp: new Date().toISOString(),
+        message: `Nueva palabra "${nombre}" agregada`,
+        user: req.user?.id || 'unknown'
+      };
+
+      // Emitir a todos los clientes conectados
+      io.emit('new_word', socketData);
+      
+      // También emitir a la sala específica
+      io.to('words_updates').emit('word_created', socketData);
+
+      console.log(`📡 WebSocket: Emitido evento 'new_word' para: ${nombre}`);
+      console.log(`👥 Clientes conectados: ${io.engine.clientsCount}`);
+      console.log(`🏠 Salas activas: ${Array.from(io.sockets.adapter.rooms.keys())}`);
+
+      res.status(201).json({
+        message: 'Elemento creado exitosamente',
+        data: nuevaPresentacion,
+        socketEmitted: true,
+        connectedClients: io.engine.clientsCount,
+        activeRooms: Array.from(io.sockets.adapter.rooms.keys())
+      });
+    } else {
+      console.warn('⚠️ Socket.io no disponible, elemento creado sin notificación WebSocket');
+      res.status(201).json({
+        message: 'Elemento creado exitosamente (sin WebSocket)',
+        data: nuevaPresentacion,
+        socketEmitted: false
+      });
+    }
+
+  } catch (error) {
+    console.error('Error:', error);
+    
+    // ✅ Emitir error también por WebSocket si está disponible
+    const io = getIO();
+    if (io) {
+      io.emit('word_error', {
+        action: 'create_error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+        user: req.user?.id || 'unknown'
+      });
+    }
+
+    res.status(500).json({
+      error: 'Error al crear el elemento',
+      detalle: error.message
+    });
+  }
+});
+
+// ✅ MEJORADO: Endpoint para probar emisión manual de WebSocket
+router.post('/test-socket', authMiddleware, async (req, res) => {
+  try {
+    const io = getIO();
+    
+    if (!io) {
+      return res.status(500).json({ 
+        error: 'Socket.io no está disponible',
+        socketAvailable: false
+      });
+    }
+
+    const testData = {
+      message: 'Prueba de WebSocket desde ContentRoutes',
+      timestamp: new Date().toISOString(),
+      user: req.user.id,
+      endpoint: '/api/content/test-socket'
+    };
+
+    // Emitir a todos los clientes
+    io.emit('test_event', testData);
+    
+    // Emitir también a la sala específica
+    io.to('words_updates').emit('test_room_event', testData);
+
+    console.log(`🧪 Test WebSocket enviado por usuario: ${req.user.id}`);
+
+    res.json({
+      message: 'Evento de prueba enviado exitosamente',
+      data: testData,
+      connectedClients: io.engine.clientsCount,
+      activeRooms: Array.from(io.sockets.adapter.rooms.keys()),
+      socketAvailable: true
+    });
+  } catch (error) {
+    console.error('Error en test-socket:', error);
+    res.status(500).json({ 
+      error: error.message,
+      socketAvailable: false
+    });
+  }
+});
+
+// ✅ NUEVO: Endpoint para verificar estado de WebSocket
+router.get('/socket-status', authMiddleware, async (req, res) => {
+  try {
+    const io = getIO();
+    
+    if (!io) {
+      return res.json({
+        socketAvailable: false,
+        message: 'Socket.io no está disponible'
+      });
+    }
+
+    const rooms = Array.from(io.sockets.adapter.rooms.keys());
+    const sockets = Array.from(io.sockets.sockets.keys());
+
+    res.json({
+      socketAvailable: true,
+      connectedClients: io.engine.clientsCount,
+      activeRooms: rooms,
+      socketIds: sockets,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      socketAvailable: false
+    });
+  }
+});
+
+module.exports = router;
 
 // Nueva ruta para obtener una presentación por nombre y aplicar un tipo específico de manipulación
 router.get('/completar/:nombre/:tipo',authMiddleware, async (req, res) => {
@@ -301,7 +510,7 @@ module.exports = router;
 
 
 
-
+/*
 // Endpoint POST para crear nueva entrada
 router.post('/CreateWords', authMiddleware, upload.fields([
   { name: 'imagen', maxCount: 1 },
@@ -372,6 +581,12 @@ router.post('/CreateWords', authMiddleware, upload.fields([
 
     await nuevaPresentacion.save();
 
+    // Emitir evento WebSocket a todos los clientes
+    io.emit('new_word', {
+      action: 'create',
+      data: nuevaPresentacion.toObject() // Convertir a objeto plano
+    });
+
     res.status(201).json({
       message: 'Elemento creado exitosamente',
       data: nuevaPresentacion
@@ -387,6 +602,7 @@ router.post('/CreateWords', authMiddleware, upload.fields([
 });
 
 module.exports = router;
+*/ 
 
 
 

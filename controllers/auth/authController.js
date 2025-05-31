@@ -223,9 +223,11 @@ const loginUser = async (req, res) => {
           return res.status(400).json({ message: 'Contraseña incorrecta' });
         }
         // Validación adicional para admin si es necesaria
-        if (!user.isAdmin) {
+        /*if (!user.isAdmin) {
+          
           return res.status(403).json({ message: 'No tiene privilegios de administrador' });
-        }
+          
+        }*/
         break;
 
       default:
@@ -271,8 +273,362 @@ const loginUser = async (req, res) => {
   }
 };
 
+//Nuevo
+// ================================
+// MIDDLEWARES DE AUTORIZACIÓN
+// ================================
+const validateRegistrationPermissions = (req, res, next) => {
+  try {
+    // Verificar que el usuario esté autenticado
+    if (!req.user) {
+      return res.status(401).json({ 
+        message: 'Token de autenticación requerido' 
+      });
+    }
+
+    // Extraer el rol que se intenta registrar desde la URL
+    const targetRole = req.originalUrl.split('/').pop();
+    const userRole = req.user.role;
+
+    console.log(`Usuario con rol ${userRole} intenta registrar: ${targetRole}`);
+
+    // Definir matriz de permisos
+    const permissions = {
+      'estudiante': [], // Estudiantes no pueden registrar a nadie
+      'profesor': ['estudiante'], // Profesores solo pueden registrar estudiantes
+      'externo': [], // Externos no pueden registrar a nadie
+      'admin': ['estudiante', 'profesor', 'externo', 'admin'] // Admin puede registrar todos los roles
+    };
+
+    // Verificar si el rol del usuario existe en la matriz de permisos
+    if (!permissions[userRole]) {
+      return res.status(403).json({ 
+        message: 'Rol de usuario no válido para realizar registros' 
+      });
+    }
+
+    // Verificar si el usuario tiene permisos para registrar el rol objetivo
+    if (!permissions[userRole].includes(targetRole)) {
+      return res.status(403).json({ 
+        message: `No tienes permisos para registrar usuarios con rol '${targetRole}'. Tu rol '${userRole}' ${permissions[userRole].length > 0 ? `solo puede registrar: ${permissions[userRole].join(', ')}` : 'no puede registrar usuarios'}` 
+      });
+    }
+
+    // Validación adicional para admin
+    if (targetRole === 'admin' && userRole !== 'admin') {
+      return res.status(403).json({ 
+        message: 'Solo los administradores pueden crear nuevos administradores' 
+      });
+    }
+
+    // Si llegamos aquí, el usuario tiene permisos
+    req.targetRole = targetRole; // Pasar el rol objetivo al siguiente middleware
+    next();
+
+  } catch (error) {
+    console.error('Error en validación de permisos:', error);
+    return res.status(500).json({ 
+      message: 'Error interno del servidor' 
+    });
+  }
+};
+// Middleware para validar acceso a listado de usuarios
+const validateListAccess = (req, res, next) => {
+  try {
+    const userRole = req.user.role;
+    const userId = req.user.userId;
+
+    // Solo profesor y admin pueden listar usuarios
+    if (!['profesor', 'admin'].includes(userRole)) {
+      return res.status(403).json({ 
+        message: 'No tienes permisos para listar usuarios' 
+      });
+    }
+
+    // Pasar el rol para filtrar en la función principal
+    req.canListRoles = userRole === 'admin' 
+      ? ['estudiante', 'profesor', 'externo', 'admin'] 
+      : ['estudiante', 'externo'];
+    
+    req.includeOwnProfile = true;
+    next();
+
+  } catch (error) {
+    console.error('Error en validación de listado:', error);
+    return res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+// Middleware para validar acceso a usuario específico
+const validateUserAccess = async (req, res, next) => {
+  try {
+    const userRole = req.user.role;
+    const userId = req.user.userId;
+    const targetUserId = req.params.id;
+
+    // Validar ObjectId
+    if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
+      return res.status(400).json({ message: "ID de usuario inválido" });
+    }
+
+    // Admin puede acceder a cualquier usuario
+    if (userRole === 'admin') {
+      req.canAccess = true;
+      return next();
+    }
+
+    // Verificar si es su propio perfil
+    if (userId === targetUserId) {
+      req.canAccess = true;
+      req.isOwnProfile = true;
+      return next();
+    }
+
+    // Para otros casos, verificar el rol del usuario objetivo
+    const targetUser = await User.findById(targetUserId).select('role');
+    if (!targetUser) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Reglas de acceso por rol
+    const accessRules = {
+      'estudiante': [], // Solo su propio perfil (ya validado arriba)
+      'profesor': ['estudiante', 'externo'], // Puede acceder a estudiantes y externos
+      'externo': [], // Solo su propio perfil (ya validado arriba)
+      'admin': ['estudiante', 'profesor', 'externo', 'admin'] // Puede acceder a todos
+    };
+
+    const allowedRoles = accessRules[userRole] || [];
+    
+    if (!allowedRoles.includes(targetUser.role)) {
+      return res.status(403).json({ 
+        message: `No tienes permisos para acceder a usuarios con rol '${targetUser.role}'` 
+      });
+    }
+
+    req.canAccess = true;
+    req.targetUserRole = targetUser.role;
+    next();
+
+  } catch (error) {
+    console.error('Error en validación de acceso:', error);
+    return res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+// Middleware para validar permisos de modificación
+const validateModificationAccess = async (req, res, next) => {
+  try {
+    const userRole = req.user.role;
+    const userId = req.user.userId;
+    const targetUserId = req.params.id;
+
+    // Admin puede modificar cualquier usuario
+    if (userRole === 'admin') {
+      req.canModify = true;
+      return next();
+    }
+
+    // Verificar si es su propio perfil
+    if (userId === targetUserId) {
+      req.canModify = true;
+      req.isOwnProfile = true;
+      return next();
+    }
+
+    // Verificar rol del usuario objetivo
+    const targetUser = await User.findById(targetUserId).select('role');
+    if (!targetUser) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Reglas de modificación por rol
+    const modificationRules = {
+      'estudiante': [], // Solo su propio perfil
+      'profesor': ['estudiante', 'externo'], // Puede modificar estudiantes y externos
+      'externo': [], // Solo su propio perfil
+      'admin': ['estudiante', 'profesor', 'externo', 'admin'] // Puede modificar todos
+    };
+
+    const allowedRoles = modificationRules[userRole] || [];
+    
+    if (!allowedRoles.includes(targetUser.role)) {
+      return res.status(403).json({ 
+        message: `No tienes permisos para modificar usuarios con rol '${targetUser.role}'` 
+      });
+    }
+
+    req.canModify = true;
+    req.targetUserRole = targetUser.role;
+    next();
+
+  } catch (error) {
+    console.error('Error en validación de modificación:', error);
+    return res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+// ================================
+// FIN MIDDLEWARES DE AUTORIZACIÓN
+// ================================
+
+
+// Función para registrar un nuevo usuario (mejorada)
+const registerUser = async (req, res) => {
+  const { username, password, firstName, lastName, sex, email, dni, age, phone, grade, specialty, institution } = req.body;
+  let newUser;
+  let newPerson;
+
+  try {
+    // 1. Obtener el rol desde el middleware de validación
+    const role = req.targetRole;
+    
+    // Validación adicional de seguridad
+    if (!role || !['estudiante', 'profesor', 'externo', 'admin'].includes(role)) {
+      return res.status(400).json({ message: "Rol no válido" });
+    }
+
+    // 2. Validar campos obligatorios
+    if (!username || !password || !firstName || !lastName || !sex || !email || !dni || !age || !phone) {
+      return res.status(400).json({ message: "Todos los campos personales son obligatorios" });
+    }
+
+    // 3. Validaciones específicas por rol
+    const roleValidations = {
+      'estudiante': () => {
+        if (!grade) {
+          throw new Error("El campo 'grado' es obligatorio para estudiantes");
+        }
+      },
+      'profesor': () => {
+        if (!specialty) {
+          throw new Error("El campo 'especialidad' es obligatorio para profesores");
+        }
+      },
+      'externo': () => {
+        if (!institution) {
+          throw new Error("El campo 'institución' es obligatorio para externos");
+        }
+      },
+      'admin': () => {
+        // Validación adicional para admin si es necesaria
+        if (req.user.role !== 'admin') {
+          throw new Error("Solo administradores pueden crear nuevos administradores");
+        }
+      }
+    };
+
+    // Ejecutar validación específica del rol
+    if (roleValidations[role]) {
+      roleValidations[role]();
+    }
+
+    // 4. Verificar si el usuario, email o DNI ya existen
+    const [userExists, emailExists, dniExists] = await Promise.all([
+      User.findOne({ username }),
+      Person.findOne({ email }),
+      Person.findOne({ dni })
+    ]);
+
+    if (userExists) return res.status(400).json({ message: "El nombre de usuario ya está en uso" });
+    if (emailExists) return res.status(400).json({ message: "El correo electrónico ya está registrado" });
+    if (dniExists) return res.status(400).json({ message: "El DNI ya está registrado" });
+
+    // 5. Hashear la contraseña
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // 6. Crear el usuario
+    newUser = await User.create({
+      username,
+      password: hashedPassword,
+      role,
+      status: "active",
+      createdBy: req.user.userId, // Registrar quién creó el usuario
+      createdAt: new Date()
+    });
+
+    // 7. Crear el perfil asociado (Person)
+    newPerson = await Person.create({
+      firstName,
+      lastName,
+      sex,
+      email,
+      dni,
+      age,
+      phone,
+      grade: role === 'estudiante' ? grade : undefined,
+      specialty: role === 'profesor' ? specialty : undefined,
+      institution: role === 'externo' ? institution : undefined,
+      associatedRole: role,
+      userRef: newUser._id,
+      status: "active",
+      createdBy: req.user.userId,
+      createdAt: new Date()
+    });
+
+    // 8. Actualizar la referencia en User
+    newUser.profileRef = newPerson._id;
+    await newUser.save();
+
+    // 9. Log de auditoría
+    console.log(`Usuario ${req.user.username} (${req.user.role}) registró nuevo usuario: ${username} (${role})`);
+
+    return res.status(201).json({
+      message: "Usuario registrado exitosamente",
+      userId: newUser._id,
+      personId: newPerson._id,
+      role: newUser.role,
+      registeredBy: req.user.username
+    });
+
+  } catch (error) {
+    console.error("Error en registro:", error);
+
+    // Rollback manual si algo falla
+    try {
+      if (newUser) await User.deleteOne({ _id: newUser._id });
+      if (newPerson) await Person.deleteOne({ _id: newPerson._id });
+    } catch (rollbackError) {
+      console.error("Error en rollback:", rollbackError);
+    }
+
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+// Función adicional para obtener permisos de un usuario (opcional)
+const getUserPermissions = (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: 'Token de autenticación requerido' });
+    }
+
+    const permissions = {
+      'estudiante': [],
+      'profesor': ['estudiante'],
+      'externo': [],
+      'admin': ['estudiante', 'profesor', 'externo', 'admin']
+    };
+
+    return res.json({
+      userRole: req.user.role,
+      canRegister: permissions[req.user.role] || [],
+      message: permissions[req.user.role].length > 0 
+        ? `Puedes registrar: ${permissions[req.user.role].join(', ')}` 
+        : 'No tienes permisos para registrar usuarios'
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo permisos:', error);
+    return res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
 
 // Función para registrar un nuevo usuario
+/* 
 const registerUser = async (req, res) => {
   const { username, password, firstName, lastName, sex, email, dni, age, phone, grade, specialty, institution } = req.body;
   let newUser;
@@ -365,7 +721,7 @@ const registerUser = async (req, res) => {
   }
 };
 
-
+*/
 // Función para cambiar estado (activar/desactivar)
 const changeStatus = async (req, res) => {
   const { userId } = req.params;
@@ -423,9 +779,68 @@ const changeStatus = async (req, res) => {
     return res.status(500).json({ message: 'Error en el servidor' });
   }
 };
-
-// Función para listar usuarios con sus perfiles
+// Función para listar usuarios (modificada)
 const getUsers = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    const userId = req.user.userId;
+    const canListRoles = req.canListRoles;
+
+    // Construir filtro basado en roles permitidos
+    let filter = {};
+    
+    if (userRole === 'profesor') {
+      // Profesor puede ver estudiantes, externos y su propio perfil
+      filter = {
+        $or: [
+          { role: { $in: ['estudiante', 'externo'] } },
+          { _id: userId } // Su propio perfil
+        ]
+      };
+    } else if (userRole === 'admin') {
+      // Admin puede ver todos
+      filter = {};
+    }
+
+    // Obtener usuarios filtrados
+    const users = await User.find(filter)
+      .select('-password')
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v'
+      })
+      .lean();
+
+    // Formatear respuesta
+    const formattedUsers = users.map(user => {
+      const { profileRef, ...userData } = user;
+      return {
+        ...userData,
+        ...profileRef
+      };
+    });
+
+    // Log de auditoría
+    console.log(`Usuario ${req.user.username} (${userRole}) consultó lista de usuarios`);
+
+    return res.status(200).json({
+      message: "Usuarios obtenidos exitosamente",
+      count: formattedUsers.length,
+      users: formattedUsers,
+      userRole: userRole,
+      accessLevel: userRole === 'admin' ? 'full' : 'limited'
+    });
+
+  } catch (error) {
+    console.error("Error al obtener usuarios:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+// Función para listar usuarios con sus perfiles
+/*const getUsers = async (req, res) => {
   try {
     // 1. Verificar si el usuario tiene permisos (opcional, dependiendo de tus requerimientos)
     // if (req.user.role !== 'admin') {
@@ -464,9 +879,57 @@ const getUsers = async (req, res) => {
     });
   }
 };
-
-// Controlador para obtener un usuario por ID
+*/
+// Función para obtener usuario por ID (modificada)
 const getUserById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userRole = req.user.role;
+
+    if (!req.canAccess) {
+      return res.status(403).json({ message: "No tienes permisos para acceder a este usuario" });
+    }
+
+    // Buscar usuario
+    const user = await User.findById(id)
+      .select('-password')
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v'
+      })
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Formatear respuesta
+    const formattedUser = {
+      ...user,
+      ...user.profileRef
+    };
+    delete formattedUser.profileRef;
+
+    // Log de auditoría
+    console.log(`Usuario ${req.user.username} (${userRole}) consultó perfil de usuario ID: ${id}`);
+
+    return res.status(200).json({
+      message: "Usuario obtenido exitosamente",
+      user: formattedUser,
+      isOwnProfile: req.isOwnProfile || false
+    });
+
+  } catch (error) {
+    console.error("Error al obtener usuario:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+// Controlador para obtener un usuario por ID
+
+/*const getUserById = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -508,8 +971,141 @@ const getUserById = async (req, res) => {
     });
   }
 };
+*/
 
+// Función para actualizar usuario (modificada)
 const updateUser = async (req, res) => {
+  const { id } = req.params;
+  let userData = {};
+  let personData = {};
+
+  try {
+    if (!req.canModify) {
+      return res.status(403).json({ message: "No tienes permisos para modificar este usuario" });
+    }
+
+    // Buscar usuario existente
+    const existingUser = await User.findById(id)
+      .populate('profileRef')
+      .lean();
+      
+    if (!existingUser || !existingUser.profileRef) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Validaciones adicionales para cambios sensibles
+    const { username, password, role, status, ...rest } = req.body;
+    
+    // Solo admin puede cambiar rol y status
+    if ((role || status) && req.user.role !== 'admin') {
+      return res.status(403).json({ 
+        message: "Solo los administradores pueden cambiar rol o status" 
+      });
+    }
+
+    // Preparar datos para actualización
+    if (username) userData.username = username;
+    if (password) userData.password = await bcrypt.hash(password, 10);
+    if (role && req.user.role === 'admin') userData.role = role;
+    if (status && req.user.role === 'admin') userData.status = status;
+
+    personData = rest;
+    const userRole = existingUser.role;
+
+    // Validaciones de unicidad
+    if (username) {
+      const userExists = await User.findOne({ username, _id: { $ne: id } });
+      if (userExists) return res.status(400).json({ message: "Nombre de usuario en uso" });
+    }
+
+    if (personData.email) {
+      const emailExists = await Person.findOne({ 
+        email: personData.email, 
+        _id: { $ne: existingUser.profileRef._id } 
+      });
+      if (emailExists) return res.status(400).json({ message: "Email ya registrado" });
+    }
+
+    if (personData.dni) {
+      const dniExists = await Person.findOne({ 
+        dni: personData.dni, 
+        _id: { $ne: existingUser.profileRef._id } 
+      });
+      if (dniExists) return res.status(400).json({ message: "DNI ya registrado" });
+    }
+
+    // Validaciones por rol
+    if (userRole === 'estudiante' && personData.grade !== undefined && !personData.grade) {
+      return res.status(400).json({ message: "Grado es requerido para estudiantes" });
+    }
+    
+    if (userRole === 'profesor' && personData.specialty !== undefined && !personData.specialty) {
+      return res.status(400).json({ message: "Especialidad es requerida para profesores" });
+    }
+    
+    if (userRole === 'externo' && personData.institution !== undefined && !personData.institution) {
+      return res.status(400).json({ message: "Institución es requerida para externos" });
+    }
+
+    // Actualizar documentos
+    const updateOperations = [];
+    
+    if (Object.keys(userData).length > 0) {
+      userData.lastModifiedBy = req.user.userId;
+      userData.lastModifiedAt = new Date();
+      updateOperations.push(
+        User.findByIdAndUpdate(id, { $set: userData }, { new: true })
+      );
+    }
+    
+    if (Object.keys(personData).length > 0) {
+      personData.lastModifiedBy = req.user.userId;
+      personData.lastModifiedAt = new Date();
+      updateOperations.push(
+        Person.findByIdAndUpdate(
+          existingUser.profileRef._id,
+          { $set: personData },
+          { new: true }
+        )
+      );
+    }
+
+    await Promise.all(updateOperations);
+
+    // Obtener resultado final
+    const finalUser = await User.findById(id)
+      .select('-password')
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v'
+      })
+      .lean();
+
+    const formattedUser = {
+      ...finalUser,
+      ...finalUser.profileRef
+    };
+    delete formattedUser.profileRef;
+
+    // Log de auditoría
+    console.log(`Usuario ${req.user.username} (${req.user.role}) actualizó usuario ID: ${id}`);
+
+    return res.status(200).json({
+      message: "Usuario actualizado exitosamente",
+      user: formattedUser,
+      modifiedBy: req.user.username
+    });
+
+  } catch (error) {
+    console.error("Error en actualización:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+/*const updateUser = async (req, res) => {
   const { id } = req.params;
   let userData = {};
   let personData = {};
@@ -626,8 +1222,64 @@ const updateUser = async (req, res) => {
     });
   }
 };
+*/
 
+// Función para eliminar usuario (modificada)
 const deleteUser = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    if (!req.canModify) {
+      return res.status(403).json({ message: "No tienes permisos para eliminar este usuario" });
+    }
+
+    // Buscar usuario
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Validación adicional: no permitir que se eliminen a sí mismos los no-admin
+    if (req.user.userId === id && req.user.role !== 'admin') {
+      return res.status(403).json({ 
+        message: "No puedes eliminar tu propia cuenta. Contacta a un administrador." 
+      });
+    }
+
+    // Eliminar perfil primero
+    const deletedPerson = await Person.findOneAndDelete({ userRef: id });
+    
+    // Eliminar usuario
+    const deletedUser = await User.findByIdAndDelete(id);
+
+    // Verificar eliminación completa
+    if (!deletedPerson || !deletedUser) {
+      if (deletedPerson && !deletedUser) {
+        await Person.create(deletedPerson);
+      }
+      return res.status(500).json({ message: "Error al eliminar los registros" });
+    }
+
+    // Log de auditoría
+    console.log(`Usuario ${req.user.username} (${req.user.role}) eliminó usuario ID: ${id}`);
+
+    return res.status(200).json({
+      message: "Usuario y perfil eliminados exitosamente",
+      deletedUserId: id,
+      deletedBy: req.user.username
+    });
+
+  } catch (error) {
+    console.error("Error al eliminar usuario:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+
+/*const deleteUser = async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -670,8 +1322,88 @@ const deleteUser = async (req, res) => {
     });
   }
 };
-//Reset password
+*/
+
+// Función para cambiar contraseña (modificada)
 const changePassword = async (req, res) => {
+  const { id } = req.params;
+  const { oldPassword, newPassword, confirmNewPassword } = req.body;
+
+  try {
+    if (!req.canModify) {
+      return res.status(403).json({ message: "No tienes permisos para cambiar la contraseña de este usuario" });
+    }
+
+    // Buscar usuario
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // Validar campos obligatorios
+    if (!newPassword || !confirmNewPassword) {
+      return res.status(400).json({ message: "Nueva contraseña y confirmación son requeridas" });
+    }
+
+    // Si no es admin y no es su propio perfil, requerir contraseña actual
+    if (req.user.role !== 'admin' && req.user.userId !== id) {
+      return res.status(403).json({ message: "No autorizado para cambiar esta contraseña" });
+    }
+
+    // Si es su propio perfil (no admin), validar contraseña actual
+    if (req.user.userId === id && req.user.role !== 'admin') {
+      if (!oldPassword) {
+        return res.status(400).json({ message: "Contraseña actual es requerida" });
+      }
+      
+      const isMatch = await bcrypt.compare(oldPassword, user.password);
+      if (!isMatch) {
+        return res.status(401).json({ message: "Contraseña actual incorrecta" });
+      }
+    }
+
+    // Validar coincidencia de nuevas contraseñas
+    if (newPassword !== confirmNewPassword) {
+      return res.status(400).json({ message: "Las nuevas contraseñas no coinciden" });
+    }
+
+    // Validar fortaleza de contraseña
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    
+    if (!passwordRegex.test(newPassword)) {
+      return res.status(400).json({
+        message: "La nueva contraseña debe contener al menos 8 caracteres, una mayúscula, una minúscula, un número y un carácter especial"
+      });
+    }
+
+    // Actualizar contraseña
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    user.lastModifiedBy = req.user.userId;
+    user.lastModifiedAt = new Date();
+    await user.save();
+
+    // Log de auditoría
+    console.log(`Usuario ${req.user.username} (${req.user.role}) cambió contraseña de usuario ID: ${id}`);
+
+    return res.status(200).json({
+      message: "Contraseña actualizada exitosamente",
+      userId: user._id,
+      changedBy: req.user.username,
+      updatedAt: user.lastModifiedAt
+    });
+
+  } catch (error) {
+    console.error("Error al cambiar contraseña:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
+
+//Reset password
+/*const changePassword = async (req, res) => {
   const { id } = req.params;
   const { oldPassword, newPassword, confirmNewPassword } = req.body;
 
@@ -740,8 +1472,50 @@ const changePassword = async (req, res) => {
     });
   }
 };
+*/
+// Función para obtener perfil propio (nueva - recomendada para estudiantes y externos)
+const getMyProfile = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId)
+      .select('-password')
+      .populate({
+        path: 'profileRef',
+        select: '-userRef -_id -createdAt -updatedAt -__v'
+      })
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({ message: "Perfil no encontrado" });
+    }
+
+    const formattedUser = {
+      ...user,
+      ...user.profileRef
+    };
+    delete formattedUser.profileRef;
+
+    return res.status(200).json({
+      message: "Perfil obtenido exitosamente",
+      user: formattedUser
+    });
+
+  } catch (error) {
+    console.error("Error al obtener perfil:", error);
+    return res.status(500).json({
+      message: "Error en el servidor",
+      error: error.message
+    });
+  }
+};
 
 module.exports = { 
+  validateRegistrationPermissions,
+  validateListAccess,
+  validateUserAccess,
+  validateModificationAccess,
+  getUserPermissions,
   changePassword ,
   deleteUser,
   updateUser,
@@ -749,10 +1523,26 @@ module.exports = {
   getUsers,
   loginUser, 
   registerUser,
-  changeStatus
+  changeStatus,
+  getMyProfile
 };
 
-
+/*
+module.exports = {
+  // Middlewares
+  validateListAccess,
+  validateUserAccess,
+  validateModificationAccess,
+  
+  // Controladores
+  getUsers,
+  getUserById,
+  updateUser,
+  deleteUser,
+  changePassword,
+  getMyProfile
+};
+*/
 
 
 /*

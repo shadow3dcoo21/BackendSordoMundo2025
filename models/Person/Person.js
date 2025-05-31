@@ -59,11 +59,11 @@ const personSchema = new mongoose.Schema({
     required: function() { return this.associatedRole === 'externo'; },
     trim: true
   },
-  
+ 
   // Relación y metadatos
   associatedRole: {
     type: String,
-    enum: ['estudiante', 'profesor', 'externo'],
+    enum: ['estudiante', 'profesor', 'externo', 'admin'],
     required: true
   },
   userRef: {
