@@ -223,11 +223,11 @@ const loginUser = async (req, res) => {
           return res.status(400).json({ message: 'Contraseña incorrecta' });
         }
         // Validación adicional para admin si es necesaria
-        if (!user.isAdmin) {
+        /*if (!user.isAdmin) {
           
           return res.status(403).json({ message: 'No tiene privilegios de administrador' });
           
-        }
+        }*/
         break;
 
       default:

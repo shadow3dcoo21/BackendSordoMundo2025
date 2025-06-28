@@ -16,6 +16,7 @@ router.post('/register/externo', authController.registerUser);  // Registro de a
 router.post('/register/estudiante', authMiddleware, authController.validateRegistrationPermissions, authController.registerUser);
 router.post('/register/profesor', authMiddleware, authController.validateRegistrationPermissions, authController.registerUser);
 router.post('/register/externo', authMiddleware, authController.validateRegistrationPermissions, authController.registerUser);
+//router.post('/register/admin',  authController.registerUser);
 router.post('/register/admin', authMiddleware, authController.validateRegistrationPermissions, authController.registerUser);
 // Ruta opcional para consultar permisos
 router.get('/permissions', authMiddleware, authController.getUserPermissions);
