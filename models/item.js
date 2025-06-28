@@ -9,7 +9,7 @@ const itemSchema = new mongoose.Schema({
     tactil: String
   }
 });
-
+//hola
 const Item = mongoose.model('Item', itemSchema);
 
 module.exports = Item;
