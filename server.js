@@ -177,7 +177,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
-  console.log(`📡 WebSocket disponible en ws://localhost:${PORT}`);
+  console.log(`📡 WebSocket disponible no no disponible en ws://localhost:${PORT}`);
   console.log(`🌐 CORS configurado para dominios permitidos`);
 });
 
